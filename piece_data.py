@@ -10,6 +10,8 @@ class Piece:
         self.color = color
         self.symbol = symbol
         self.value = value
+        self.max_hp = 20
+        self.hp = self.max_hp
         self.position = (0, 0)
         self.stage = 1
         self.image = None
@@ -30,6 +32,8 @@ class Piece:
 class Pawn(Piece):
     def __init__(self, color):
         super().__init__(color, 'P', 1)
+        self.max_hp = 8
+        self.hp = self.max_hp
         forward = -1 if color == 'white' else 1
         self.movement = {
             'type': 'pawn',

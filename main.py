@@ -19,6 +19,7 @@ expanded_grid_width = 50
 expanded_left_columns = expanded_grid_width // 2
 square_size = 100
 hand_size_limit = 8
+player_attack_damage = 1
 hand_card_width = 96
 hand_card_height = 106
 hand_card_gap = 8
@@ -39,6 +40,18 @@ stages = {
     'caves': (colors['light_grey'], colors['dark_grey']),
 }
 stage_names = list(stages.keys())
+church_stage_colors = ((205, 190, 160), (104, 87, 78))
+weekday_names = ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+moon_phase_names = (
+    'New Moon',
+    'Waxing Crescent',
+    'First Quarter',
+    'Waxing Gibbous',
+    'Full Moon',
+    'Waning Gibbous',
+    'Last Quarter',
+    'Waning Crescent',
+)
 
 
 def normalize_stage_index(value):
@@ -55,16 +68,33 @@ def normalize_stage_index(value):
     return value
 
 
+def is_sunday_church_stage(stage_index=None):
+    if stage_index is None:
+        stage_index = current_stage
+    return (
+        normalize_stage_index(stage_index) == stage_names.index('plains')
+        and get_weekday_name() == 'Sunday'
+    )
+
+
+def get_weekday_name(day_number=None):
+    if day_number is None:
+        day_number = weather_day
+    return weekday_names[(day_number - 1) % len(weekday_names)]
+
+
 current_stage = normalize_stage_index(1)
 stage_widths = {stage: grid_size for stage in range(len(stage_names))}
 stage_left_edges = {stage: 0 for stage in range(len(stage_names))}
 stage_scroll_offsets = {stage: 0 for stage in range(len(stage_names))}
 selected_piece = None
+inspected_piece = None
 current_turn = 'white'
 last_move = None
 en_passant_target = None
 winner = None
 game_over = False
+player_health = {'white': starting_player_health, 'black': starting_player_health}
 web_tiles = {}
 web_images = {}
 secondary_window_process = None
@@ -79,6 +109,20 @@ currency_window_queue = None
 weather_window_process = None
 weather_window_queue = None
 weather_window_last_state = None
+wind_window_process = None
+wind_window_queue = None
+wind_window_last_state = None
+moon_window_process = None
+moon_window_queue = None
+moon_window_last_state = None
+player_status_window_process = None
+player_status_window_queue = None
+player_status_command_queue = None
+player_status_last_state = None
+promotion_shop_process = None
+promotion_shop_queue = None
+promotion_shop_command_queue = None
+pending_promotion_piece = None
 debug_card_window_process = None
 debug_card_window_queue = None
 debug_card_command_queue = None
@@ -92,28 +136,61 @@ currencies = {
 }
 weather_day = 1
 weather_turn_counts = {'white': 0, 'black': 0}
+
+
+def create_weather_forecast(stage):
+    conditions = weather_data.WEATHER_CONDITIONS_BY_STAGE[stage_names[stage]]
+    predicted_condition = random.choice(conditions)
+    chance = random.randint(10, 95)
+    actual_condition = (
+        predicted_condition
+        if random.randint(1, 100) <= chance
+        else random.choice(tuple(condition for condition in conditions if condition != predicted_condition))
+    )
+    return {
+        'condition': predicted_condition,
+        'chance': chance,
+        'actual': actual_condition,
+    }
+
+
 weather_forecasts = {
-    stage: [random.choice(weather_data.WEATHER_CONDITIONS_BY_STAGE[stage_names[stage]]) for _ in range(7)]
+    stage: [create_weather_forecast(stage) for _ in range(7)]
     for stage in range(len(stage_names))
 }
 crystal_haze_hallucinations = []
 crystal_haze_source_ids = set()
 crystal_haze_weather_key = None
 storm_cloud_tiles = set()
+storm_cloud_groups = []
 storm_cloud_weather_key = None
-storm_piece_exposure = {}
-storm_shocked_pieces = {}
+wind_directions = (
+    (-1, -1), (0, -1), (1, -1),
+    (-1, 0),            (1, 0),
+    (-1, 1),  (0, 1),   (1, 1),
+)
+ambient_wind_direction = random.choice(wind_directions)
+ambient_wind_speed = random.randint(1, 3)
+storm_wind_direction = None
+storm_wind_speed = 0
 storm_turn_counts = {'white': 0, 'black': 0}
 cancel_played_this_turn = False
 skipped_turns = {'white': 0, 'black': 0}
 rotated_stages = set()
 reverse_card_stages = {'green': 1, 'blue': 0, 'yellow': 2, 'red': 3}
+promotion_piece_types = ('Pawn', 'Rook', 'Knight', 'Bishop', 'Queen', 'Avian', 'Spider', 'Mole', 'King')
 
 
 def reset_card_game():
     global draw_pile, played_pile, cancel_played_this_turn
     global weather_day
-    global storm_cloud_tiles, storm_cloud_weather_key, storm_piece_exposure, storm_shocked_pieces
+    player_health.update({
+        'white': starting_player_health,
+        'black': starting_player_health,
+    })
+    global storm_cloud_tiles, storm_cloud_groups, storm_cloud_weather_key
+    global storm_wind_direction, storm_wind_speed
+    global ambient_wind_direction, ambient_wind_speed
     draw_pile = card_data.create_deck()
     random.shuffle(draw_pile)
     played_pile = [draw_pile.pop()]
@@ -127,33 +204,43 @@ def reset_card_game():
     weather_turn_counts.update({'white': 0, 'black': 0})
     storm_turn_counts.update({'white': 0, 'black': 0})
     storm_cloud_tiles = set()
+    storm_cloud_groups = []
     storm_cloud_weather_key = None
-    storm_piece_exposure.clear()
-    storm_shocked_pieces.clear()
+    storm_wind_direction = None
+    storm_wind_speed = 0
+    ambient_wind_direction = random.choice(wind_directions)
+    ambient_wind_speed = random.randint(1, 3)
     for stage in weather_forecasts:
-        weather_forecasts[stage] = [
-            random.choice(weather_data.WEATHER_CONDITIONS_BY_STAGE[stage_names[stage]])
-            for _ in range(7)
-        ]
+        weather_forecasts[stage] = [create_weather_forecast(stage) for _ in range(7)]
     send_currency_window_state()
     send_weather_window_state()
+    send_wind_window_state()
 
 
 def advance_weather_turn(color):
-    global weather_day
     weather_turn_counts[color] += 1
-    if all(turns >= 2 for turns in weather_turn_counts.values()):
-        weather_day += 1
-        for stage, forecast in weather_forecasts.items():
-            forecast.pop(0)
-            forecast.append(random.choice(weather_data.WEATHER_CONDITIONS_BY_STAGE[stage_names[stage]]))
-        weather_turn_counts.update({'white': 0, 'black': 0})
+    if all(turns >= 3 for turns in weather_turn_counts.values()):
+        advance_weather_day()
+
+
+def advance_weather_day():
+    global weather_day, ambient_wind_direction, ambient_wind_speed
+    weather_day += 1
+    ambient_wind_direction = random.choice(wind_directions)
+    ambient_wind_speed = random.randint(1, 3)
+    for stage, forecast in weather_forecasts.items():
+        forecast.pop(0)
+        forecast.append(create_weather_forecast(stage))
+    weather_turn_counts.update({'white': 0, 'black': 0})
     send_weather_window_state()
+    send_wind_window_state()
 
 
 def award_gold(color, amount):
     currencies[color]['gold'] += amount
     send_currency_window_state()
+    if pending_promotion_piece is not None and pending_promotion_piece.color == color:
+        send_promotion_shop_state()
 
 
 def can_play_card(card, top_card):
@@ -277,7 +364,7 @@ def get_stage_shift_target_square(piece, target_stage):
 def get_weather_effect(stage, effect_type):
     stage = normalize_stage_index(stage)
     stage_name = stage_names[stage]
-    condition = weather_forecasts[stage][0]
+    condition = weather_forecasts[stage][0]['actual']
     effect = weather_data.WEATHER_EFFECTS_BY_STAGE.get(stage_name, {}).get(condition)
     if effect is not None and effect.get('type') == effect_type:
         return effect
@@ -285,17 +372,21 @@ def get_weather_effect(stage, effect_type):
 
 
 def ensure_storm_clouds():
-    global storm_cloud_tiles, storm_cloud_weather_key, storm_piece_exposure
+    global storm_cloud_tiles, storm_cloud_groups, storm_cloud_weather_key
+    global storm_wind_direction, storm_wind_speed
 
     sky_stage = stage_names.index('sky')
     effect = get_weather_effect(sky_stage, 'storm_clouds')
-    if effect is None:
+    condition = weather_forecasts[sky_stage][0]['actual']
+    if effect is None and condition != 'Cloudy':
         storm_cloud_tiles = set()
+        storm_cloud_groups = []
         storm_cloud_weather_key = None
-        storm_piece_exposure.clear()
+        storm_wind_direction = None
+        storm_wind_speed = 0
         return
 
-    weather_key = (weather_day, weather_forecasts[sky_stage][0])
+    weather_key = (weather_day, weather_forecasts[sky_stage][0]['actual'])
     if weather_key == storm_cloud_weather_key:
         return
 
@@ -307,12 +398,21 @@ def ensure_storm_clouds():
         for y in range(grid_size)
     }
     cloud_tiles = set()
-    for _ in range(effect['clump_count']):
+    cloud_groups = []
+    cloud_settings = effect or {
+        'clump_count': 3,
+        'clump_min_tiles': 2,
+        'clump_max_tiles': 4,
+    }
+    for _ in range(cloud_settings['clump_count']):
         available_seeds = list(all_tiles - cloud_tiles)
         if not available_seeds:
             break
         clump = {random.choice(available_seeds)}
-        target_size = random.randint(effect['clump_min_tiles'], effect['clump_max_tiles'])
+        target_size = random.randint(
+            cloud_settings['clump_min_tiles'],
+            cloud_settings['clump_max_tiles'],
+        )
         while len(clump) < target_size:
             frontier = {
                 (x + dx, y + dy)
@@ -324,10 +424,15 @@ def ensure_storm_clouds():
                 break
             clump.add(random.choice(list(frontier)))
         cloud_tiles.update(clump)
+        cloud_groups.append(clump)
 
     storm_cloud_tiles = cloud_tiles
+    storm_cloud_groups = cloud_groups
     storm_cloud_weather_key = weather_key
-    storm_piece_exposure.clear()
+    if effect is not None:
+        storm_wind_direction = random.choice(wind_directions)
+        storm_wind_speed = random.randint(1, 3)
+    send_wind_window_state()
 
 
 def is_storm_cloud_tile(square, stage):
@@ -335,60 +440,85 @@ def is_storm_cloud_tile(square, stage):
     return normalize_stage_index(stage) == stage_names.index('sky') and square in storm_cloud_tiles
 
 
+def move_cloud_group(cloud_group, dx, dy, speed, left_edge, stage_width):
+    return {
+        (
+            left_edge + (x - left_edge + dx * speed) % stage_width,
+            (y + dy * speed) % grid_size,
+        )
+        for x, y in cloud_group
+    }
+
+
 def advance_stormy_turn(color, pieces):
-    global storm_piece_exposure, storm_shocked_pieces
+    global storm_cloud_tiles, storm_cloud_groups
 
     ensure_storm_clouds()
-    effect = get_weather_effect(stage_names.index('sky'), 'storm_clouds')
-    active_pieces = get_pieces_with_hallucinations(pieces)
-    active_ids = {id(piece) for piece in active_pieces}
-    storm_piece_exposure = {
-        piece_id: exposure
-        for piece_id, exposure in storm_piece_exposure.items()
-        if piece_id in active_ids
-    }
-    storm_shocked_pieces = {
-        piece_id: status
-        for piece_id, status in storm_shocked_pieces.items()
-        if piece_id in active_ids
-    }
+    sky_stage = stage_names.index('sky')
+    storm_active = get_weather_effect(sky_stage, 'storm_clouds') is not None
+    if storm_active:
+        for piece in pieces[:]:
+            if (
+                piece.color == color
+                and piece.stage == sky_stage
+                and piece.position in storm_cloud_tiles
+            ):
+                damage_piece(piece, 4, pieces)
+                update_winner_if_no_kings(pieces)
 
-    for piece_id, status in list(storm_shocked_pieces.items()):
-        if status['color'] != color:
-            continue
-        status['turns_remaining'] -= 1
-        if status['turns_remaining'] <= 0:
-            del storm_shocked_pieces[piece_id]
+    cave_stage = stage_names.index('caves')
+    if get_weather_effect(cave_stage, 'barometric_winds') is not None:
+        move_cave_pieces_with_wind(
+            pieces,
+            ambient_wind_direction,
+            ambient_wind_speed,
+        )
 
-    if effect is not None:
-        turn_count = storm_turn_counts[color]
-        for piece in active_pieces:
-            if piece.color != color or piece.stage != stage_names.index('sky'):
-                continue
-            piece_id = id(piece)
-            if piece_id in storm_shocked_pieces:
-                storm_piece_exposure.pop(piece_id, None)
-                continue
-            if not is_storm_cloud_tile(piece.position, piece.stage):
-                storm_piece_exposure.pop(piece_id, None)
-                continue
-
-            exposure = storm_piece_exposure.get(piece_id)
-            if exposure is None:
-                storm_piece_exposure[piece_id] = {
-                    'piece': piece,
-                    'color': color,
-                    'turn_count': turn_count,
-                }
-            elif turn_count - exposure['turn_count'] >= effect['turns_before_shock']:
-                storm_shocked_pieces[piece_id] = {
-                    'piece': piece,
-                    'color': color,
-                    'turns_remaining': effect['shock_duration_turns'],
-                }
-                storm_piece_exposure.pop(piece_id, None)
+    if storm_cloud_tiles:
+        dx, dy = storm_wind_direction or ambient_wind_direction
+        speed = storm_wind_speed if storm_active else ambient_wind_speed
+        left_edge = stage_left_edges[sky_stage]
+        stage_width = stage_widths[sky_stage]
+        storm_cloud_groups = [
+            move_cloud_group(group, dx, dy, speed, left_edge, stage_width)
+            for group in storm_cloud_groups
+        ]
+        storm_cloud_tiles = set().union(*storm_cloud_groups)
 
     storm_turn_counts[color] += 1
+    send_wind_window_state()
+
+
+def move_cave_pieces_with_wind(pieces, direction, distance):
+    global last_move, en_passant_target
+
+    dx, dy = direction
+    if (dx == 0 and dy == 0) or distance <= 0:
+        return
+
+    cave_stage = stage_names.index('caves')
+    cave_pieces = [piece for piece in pieces if piece.stage == cave_stage]
+    moved_piece = False
+    for _ in range(distance):
+        cave_pieces.sort(
+            key=lambda piece: piece.position[0] * dx + piece.position[1] * dy,
+            reverse=True,
+        )
+        for piece in cave_pieces:
+            target = (piece.position[0] + dx, piece.position[1] + dy)
+            if not in_bounds(target, cave_stage):
+                continue
+            if any(
+                other is not piece and other.position == target
+                for other in cave_pieces
+            ):
+                continue
+            piece.position = target
+            moved_piece = True
+
+    if moved_piece:
+        last_move = None
+        en_passant_target = None
 
 
 def is_square_hidden_by_fog(square, color, stage):
@@ -421,7 +551,7 @@ def ensure_crystal_haze_hallucinations(pieces):
         crystal_haze_weather_key = None
         return
 
-    weather_key = (weather_day, weather_forecasts[cave_stage][0])
+    weather_key = (weather_day, weather_forecasts[cave_stage][0]['actual'])
     if weather_key != crystal_haze_weather_key:
         if getattr(selected_piece, 'is_hallucination', False):
             selected_piece = None
@@ -642,7 +772,20 @@ def get_piece_reference_pages():
                 {'label': 'Ground Shift', 'pattern': [(0, 0)], 'attacks': []},
             ],
         },
-        {'name': 'Queen', 'piece': piece_data.Queen('white'), 'pattern': [(0, -1), (0, 1), (-1, 0), (1, 0), (-1, -1), (-2, -2), (-3, -3), (1, -1), (2, -2), (3, -3), (-1, 1), (-2, 2), (-3, 3), (1, 1), (2, 2), (3, 3)], 'attacks': []},
+        {
+            'name': 'Queen',
+            'piece': piece_data.Queen('white'),
+            'description': 'Play Queen of Clubs to surround your Queen with pawns on empty adjacent squares.',
+            'abilities': [
+                {
+                    'name': 'pawn circle',
+                    'description': 'Play Queen of Clubs to place up to eight pawns around your Queen.',
+                    'fallback_color': (115, 135, 95),
+                },
+            ],
+            'pattern': [(0, -1), (0, 1), (-1, 0), (1, 0), (-1, -1), (-2, -2), (-3, -3), (1, -1), (2, -2), (3, -3), (-1, 1), (-2, 2), (-3, 3), (1, 1), (2, 2), (3, 3)],
+            'attacks': [],
+        },
         {
             'name': 'King',
             'piece': piece_data.King('white'),
@@ -1066,13 +1209,18 @@ def get_legal_moves(piece, pieces):
 def draw_board():
     board_width = get_visible_board_width()
     scroll_offset = get_board_scroll_offset()
+    stage_index = normalize_stage_index(current_stage)
+    tile_colors = (
+        church_stage_colors
+        if is_sunday_church_stage(stage_index)
+        else stages[stage_names[stage_index]]
+    )
     for i in range(board_width):
         for j in range(grid_size):
             board_x = i + scroll_offset
             rect_x = i * square_size
             rect_y = j * square_size
-            stage_index = normalize_stage_index(current_stage)
-            color = stages[stage_names[stage_index]][0] if (board_x + j) % 2 == 0 else stages[stage_names[stage_index]][1]
+            color = tile_colors[0] if (board_x + j) % 2 == 0 else tile_colors[1]
             pygame.draw.rect(screen, color, (rect_x, rect_y, square_size, square_size))
 
     for (web_x, web_y), owner in get_visible_webs().items():
@@ -1123,6 +1271,49 @@ def draw_board():
                 move_surface = pygame.Surface((square_size, square_size), pygame.SRCALPHA)
                 move_surface.fill((255, 120, 120, 120))
                 screen.blit(move_surface, (display_move_x * square_size, display_move_y * square_size))
+
+
+def get_daylight_darkening_alpha():
+    completed_turns = sum(weather_turn_counts.values())
+    return {
+        3: 65,
+        4: 145,
+        5: 205,
+    }.get(completed_turns, 0)
+
+
+def get_daylight_desaturation_alpha():
+    completed_turns = sum(weather_turn_counts.values())
+    return {
+        3: 45,
+        4: 100,
+        5: 150,
+    }.get(completed_turns, 0)
+
+
+def draw_daylight_overlay():
+    completed_turns = sum(weather_turn_counts.values())
+    if completed_turns == 0:
+        golden_overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+        golden_overlay.fill((190, 125, 30, 45))
+        screen.blit(golden_overlay, (0, 0))
+        early_dark_overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+        early_dark_overlay.fill((0, 0, 0, 24))
+        screen.blit(early_dark_overlay, (0, 0))
+        return
+
+    desaturation_alpha = get_daylight_desaturation_alpha()
+    if desaturation_alpha:
+        desaturated_screen = pygame.transform.grayscale(screen)
+        desaturated_screen.set_alpha(desaturation_alpha)
+        screen.blit(desaturated_screen, (0, 0))
+
+    alpha = get_daylight_darkening_alpha()
+    if not alpha:
+        return
+    overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, alpha))
+    screen.blit(overlay, (0, 0))
 
 
 def draw_fog_of_war():
@@ -1229,16 +1420,42 @@ def move_currency_window_to_right_top(hwnd, width, height):
     user32.MoveWindow(hwnd, x, 20, width, height, True)
 
 
+def move_player_status_window_to_right_bottom(hwnd, width, height):
+    if hwnd is None:
+        return
+
+    user32 = ctypes.windll.user32
+    screen_width = user32.GetSystemMetrics(0)
+    screen_height = user32.GetSystemMetrics(1)
+    x = max(20, screen_width - width - 20)
+    y = max(20, screen_height - height - 60)
+    user32.MoveWindow(hwnd, x, y, width, height, True)
+
+
 def move_weather_window_to_left_top(hwnd, width, height):
     if hwnd is None:
         return
     ctypes.windll.user32.MoveWindow(hwnd, 20, 20, width, height, True)
 
 
+def move_wind_window_to_left_below_weather(hwnd, width, height):
+    if hwnd is None:
+        return
+    ctypes.windll.user32.MoveWindow(hwnd, 20, 255, width, height, True)
+
+
+def move_moon_window_to_left_below_wind(hwnd, width, height):
+    if hwnd is None:
+        return
+    ctypes.windll.user32.MoveWindow(hwnd, 20, 505, width, height, True)
+
+
 def get_stage_light_color(stage_index=None):
     if stage_index is None:
         stage_index = current_stage
     stage_index = normalize_stage_index(stage_index)
+    if is_sunday_church_stage(stage_index):
+        return church_stage_colors[0]
     return stages[stage_names[stage_index]][0]
 
 
@@ -1714,10 +1931,11 @@ def run_debug_card_window(queue, command_queue):
     columns = 8
     card_gap = 8
     margin = 14
-    header_height = 52
+    header_height = 108
     window_width = margin * 2 + columns * hand_card_width + (columns - 1) * card_gap
     window_height = 760
     row_height = hand_card_height + card_gap
+    skip_day_button = pygame.Rect(margin, 68, 250, 30)
 
     pygame.init()
     debug_screen = pygame.display.set_mode((window_width, window_height))
@@ -1726,11 +1944,36 @@ def run_debug_card_window(queue, command_queue):
     image_cache = {}
     cards = []
     current_player = 'white'
+    current_day = 1
     status = 'Click a card to play it for the current player.'
     scroll_row = 0
     rejected_card_id = None
     rejected_at = 0
     invalid_feedback_duration = 700
+
+    def wrap_status(text, font, max_width, max_lines):
+        words = text.split()
+        lines = []
+        current_line = ''
+        while words and len(lines) < max_lines:
+            word = words.pop(0)
+            candidate = f'{current_line} {word}'.strip()
+            if font.size(candidate)[0] <= max_width:
+                current_line = candidate
+            elif current_line:
+                lines.append(current_line)
+                current_line = ''
+                words.insert(0, word)
+            else:
+                lines.append(word)
+        if current_line and len(lines) < max_lines:
+            lines.append(current_line)
+        if words and lines:
+            last_line = lines[-1]
+            while last_line and font.size(f'{last_line}...')[0] > max_width:
+                last_line = last_line[:-1]
+            lines[-1] = f'{last_line.rstrip()}...'
+        return lines
 
     while True:
         visible_rows = max(1, (window_height - header_height - margin + card_gap) // row_height)
@@ -1754,6 +1997,9 @@ def run_debug_card_window(queue, command_queue):
             if event.type == pygame.MOUSEBUTTONDOWN and event.button in (4, 5):
                 scroll_row = min(max_scroll_row, max(0, scroll_row + (1 if event.button == 5 else -1)))
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if skip_day_button.collidepoint(event.pos):
+                    command_queue.put({'action': 'skip_weather_day'})
+                    continue
                 mouse_x, mouse_y = event.pos
                 if mouse_y >= header_height:
                     relative_x = mouse_x - margin
@@ -1780,6 +2026,7 @@ def run_debug_card_window(queue, command_queue):
                 return
             cards = message.get('cards', cards)
             current_player = message.get('turn', current_player)
+            current_day = message.get('day', current_day)
             status = message.get('status', status)
             rejected_card_id = message.get('rejected_card_id')
             if rejected_card_id is not None:
@@ -1793,12 +2040,26 @@ def run_debug_card_window(queue, command_queue):
             (240, 240, 245),
         )
         debug_screen.blit(title, (margin, 8))
-        hint = pygame.font.Font(None, 18).render(
-            f'{status}  |  Scroll to browse all {len(cards)} cards.',
+        hint_font = pygame.font.Font(None, 18)
+        for line_index, hint_line in enumerate(
+            wrap_status(status, hint_font, window_width - margin * 2, 2)
+        ):
+            hint = hint_font.render(hint_line, True, (180, 180, 190))
+            debug_screen.blit(hint, (margin, 32 + line_index * 17))
+        pygame.draw.rect(debug_screen, (83, 105, 78), skip_day_button, border_radius=5)
+        pygame.draw.rect(debug_screen, (145, 170, 130), skip_day_button, 1, border_radius=5)
+        skip_label = pygame.font.Font(None, 21).render(
+            f"Skip ahead one day ({get_weekday_name(current_day)})",
+            True,
+            (240, 240, 235),
+        )
+        debug_screen.blit(skip_label, skip_label.get_rect(center=skip_day_button.center))
+        scroll_hint = hint_font.render(
+            f'Scroll to browse all {len(cards)} cards.',
             True,
             (180, 180, 190),
         )
-        debug_screen.blit(hint, (margin, 32))
+        debug_screen.blit(scroll_hint, scroll_hint.get_rect(midleft=(margin + 262, skip_day_button.centery)))
 
         for index, card in enumerate(cards):
             row, col = divmod(index, columns)
@@ -1955,12 +2216,237 @@ def run_currency_window(queue):
         clock.tick(30)
 
 
+def draw_player_stencil(surface, center, color):
+    center_x, center_y = center
+    pygame.draw.circle(surface, color, (center_x, center_y - 48), 12)
+    pygame.draw.polygon(surface, color, (
+        (center_x - 12, center_y - 32),
+        (center_x + 12, center_y - 32),
+        (center_x + 15, center_y + 12),
+        (center_x - 15, center_y + 12),
+    ))
+    pygame.draw.polygon(surface, color, (
+        (center_x - 11, center_y - 29),
+        (center_x - 3, center_y - 25),
+        (center_x - 39, center_y + 2),
+        (center_x - 45, center_y - 5),
+    ))
+    pygame.draw.polygon(surface, color, (
+        (center_x + 11, center_y - 29),
+        (center_x + 3, center_y - 25),
+        (center_x + 39, center_y + 2),
+        (center_x + 45, center_y - 5),
+    ))
+    pygame.draw.polygon(surface, color, (
+        (center_x - 13, center_y + 8),
+        (center_x - 2, center_y + 8),
+        (center_x - 14, center_y + 44),
+        (center_x - 26, center_y + 44),
+    ))
+    pygame.draw.polygon(surface, color, (
+        (center_x + 13, center_y + 8),
+        (center_x + 2, center_y + 8),
+        (center_x + 14, center_y + 44),
+        (center_x + 26, center_y + 44),
+    ))
+
+
+def run_player_status_window(queue, command_queue):
+    window_width = 400
+    window_height = 180
+    attack_button = pygame.Rect(126, 102, 250, 36)
+    player_colors = {
+        'white': (235, 235, 225),
+        'black': (125, 140, 165),
+    }
+
+    pygame.init()
+    status_screen = pygame.display.set_mode((window_width, window_height))
+    hwnd = pygame.display.get_wm_info()['window']
+    move_player_status_window_to_right_bottom(hwnd, window_width, window_height)
+    pygame.display.set_caption('Player Status')
+    clock = pygame.time.Clock()
+    state = {
+        'health': {'white': starting_player_health, 'black': starting_player_health},
+        'turn': 'white',
+        'can_attack': False,
+        'game_over': False,
+        'winner': None,
+    }
+
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT or (
+                event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
+            ):
+                pygame.quit()
+                return
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                target = 'black' if state['turn'] == 'white' else 'white'
+                if (
+                    attack_button.collidepoint(event.pos)
+                    and state['can_attack']
+                    and not state['game_over']
+                ):
+                    command_queue.put({'action': 'attack_player', 'target': target})
+
+        while True:
+            try:
+                message = queue.get_nowait()
+            except Empty:
+                break
+            if message.get('close'):
+                pygame.quit()
+                return
+            state.update(message)
+
+        status_screen.fill((24, 24, 30))
+        player = state['turn']
+        health = state['health'][player]
+        can_attack = state['can_attack'] and not state['game_over']
+        draw_player_stencil(
+            status_screen,
+            (72, window_height // 2),
+            player_colors[player],
+        )
+
+        info_left = 132
+        name = pygame.font.Font(None, 30).render(
+            f'{player.upper()} PLAYER',
+            True,
+            player_colors[player],
+        )
+        status_screen.blit(name, (info_left, 35))
+        health_label = pygame.font.Font(None, 27).render(
+            f'{health} / {starting_player_health} HP',
+            True,
+            (240, 240, 245),
+        )
+        status_screen.blit(health_label, (info_left, 68))
+
+        target = 'black' if player == 'white' else 'white'
+        if can_attack:
+            attack_label = pygame.font.Font(None, 23).render(
+                f'Click to attack {target.upper()} (-{player_attack_damage} HP)',
+                True,
+                (240, 195, 85),
+            )
+            status_screen.blit(attack_label, (info_left, 106))
+
+        if state['game_over']:
+            message = f"{state['winner'].capitalize()} wins!"
+            hint = pygame.font.Font(None, 19).render(message, True, (205, 205, 215))
+            status_screen.blit(hint, (info_left, 106))
+
+        pygame.display.flip()
+        clock.tick(30)
+
+
+def run_promotion_shop_window(state_queue, command_queue):
+    window_width = 390
+    window_height = 350
+    button_width = 170
+    button_height = 42
+    column_gap = 10
+    row_gap = 8
+    button_left = 20
+    button_top = 92
+
+    pygame.init()
+    shop_screen = pygame.display.set_mode((window_width, window_height))
+    pygame.display.set_caption('Pawn Promotion Shop')
+    clock = pygame.time.Clock()
+    player = 'white'
+    gold = 0
+    options = get_promotion_shop_options(player)
+
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT or (
+                event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
+            ):
+                pygame.quit()
+                return
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                for index, option in enumerate(options):
+                    row, column = divmod(index, 2)
+                    button_rect = pygame.Rect(
+                        button_left + column * (button_width + column_gap),
+                        button_top + row * (button_height + row_gap),
+                        button_width,
+                        button_height,
+                    )
+                    if button_rect.collidepoint(event.pos) and option['price'] <= gold:
+                        command_queue.put({
+                            'action': 'promote',
+                            'piece_type': option['name'],
+                        })
+                        pygame.quit()
+                        return
+
+        while True:
+            try:
+                message = state_queue.get_nowait()
+            except Empty:
+                break
+            if message.get('close'):
+                pygame.quit()
+                return
+            player = message.get('player', player)
+            gold = message.get('gold', gold)
+            options = message.get('options', options)
+
+        shop_screen.fill((24, 24, 30))
+        pygame.draw.rect(shop_screen, (90, 90, 105), shop_screen.get_rect(), 3)
+        title = pygame.font.Font(None, 34).render('PROMOTION SHOP', True, (240, 205, 75))
+        shop_screen.blit(title, title.get_rect(center=(window_width // 2, 27)))
+        balance = pygame.font.Font(None, 26).render(
+            f'{player.capitalize()} gold: {gold}',
+            True,
+            (240, 205, 75),
+        )
+        shop_screen.blit(balance, balance.get_rect(center=(window_width // 2, 62)))
+
+        for index, option in enumerate(options):
+            row, column = divmod(index, 2)
+            button_rect = pygame.Rect(
+                button_left + column * (button_width + column_gap),
+                button_top + row * (button_height + row_gap),
+                button_width,
+                button_height,
+            )
+            affordable = option['price'] <= gold
+            background = (66, 83, 70) if affordable else (48, 48, 54)
+            foreground = (240, 240, 245) if affordable else (125, 125, 132)
+            pygame.draw.rect(shop_screen, background, button_rect, border_radius=5)
+            pygame.draw.rect(shop_screen, (110, 110, 120), button_rect, 1, border_radius=5)
+            label = pygame.font.Font(None, 23).render(
+                f"{option['symbol']} {option['name']} - {option['price']} gold",
+                True,
+                foreground,
+            )
+            shop_screen.blit(label, label.get_rect(center=button_rect.center))
+
+        pygame.display.flip()
+        clock.tick(30)
+
+
 def run_weather_window(queue):
     day_tile_width = 112
-    day_tile_height = 136
+    day_tile_height = 142
     day_tile_gap = 8
     weather_width = 28 + len(range(7)) * day_tile_width + 6 * day_tile_gap
-    weather_height = 220
+    weather_height = 235
+    chance_phrases = {
+        'Sunny': 'a sunny day',
+        'Rainy': 'rain',
+        'Cloudy': 'clouds',
+        'Stormy': 'storms',
+        'Windy': 'wind',
+        'Barometric Winds': 'winds',
+        'Snowy': 'snow',
+        'Foggy': 'fog',
+    }
 
     pygame.init()
     weather_screen = pygame.display.set_mode((weather_width, weather_height))
@@ -1999,9 +2485,9 @@ def run_weather_window(queue):
         )
         weather_screen.blit(stage_text, stage_text.get_rect(center=(weather_width // 2, 72)))
 
-        for index, condition in enumerate(forecast['forecast']):
+        for index, day_forecast in enumerate(forecast['forecast']):
             tile_x = 14 + index * (day_tile_width + day_tile_gap)
-            tile_rect = pygame.Rect(tile_x, 100, day_tile_width, day_tile_height)
+            tile_rect = pygame.Rect(tile_x, 93, day_tile_width, day_tile_height)
             pygame.draw.rect(
                 weather_screen,
                 (53, 67, 82) if index else (86, 79, 48),
@@ -2011,22 +2497,219 @@ def run_weather_window(queue):
             pygame.draw.rect(weather_screen, (125, 145, 165), tile_rect, 1, border_radius=7)
 
             day_text = pygame.font.Font(None, 23).render(
-                f"Day {forecast['day'] + index}",
+                get_weekday_name(forecast['day'] + index),
                 True,
                 (245, 245, 245),
             )
             weather_screen.blit(day_text, day_text.get_rect(center=(tile_rect.centerx, tile_rect.y + 34)))
 
+            condition = day_forecast['condition']
             condition_lines = textwrap.wrap(condition, width=10)
-            condition_font = pygame.font.Font(None, 20)
-            for line_index, condition_line in enumerate(condition_lines[:3]):
+            condition_font = pygame.font.Font(None, 19)
+            for line_index, condition_line in enumerate(condition_lines[:2]):
                 condition_text = condition_font.render(condition_line, True, (210, 225, 235))
                 weather_screen.blit(
                     condition_text,
                     condition_text.get_rect(
-                        center=(tile_rect.centerx, tile_rect.y + 72 + line_index * 21)
+                        center=(tile_rect.centerx, tile_rect.y + 70 + line_index * 18)
                     ),
                 )
+
+            chance_description = chance_phrases.get(condition, condition.lower())
+            chance_lines = textwrap.wrap(
+                f"{day_forecast['chance']}% chance of {chance_description}",
+                width=15,
+            )
+            chance_font = pygame.font.Font(None, 17)
+            chance_start_y = tile_rect.y + 108
+            for line_index, chance_line in enumerate(chance_lines[:2]):
+                chance_text = chance_font.render(chance_line, True, (190, 205, 220))
+                weather_screen.blit(
+                    chance_text,
+                    chance_text.get_rect(
+                        center=(tile_rect.centerx, chance_start_y + line_index * 15)
+                    ),
+                )
+
+        pygame.display.flip()
+        clock.tick(30)
+
+
+def run_wind_window(queue):
+    wind_width = 360
+    wind_height = 240
+
+    pygame.init()
+    wind_screen = pygame.display.set_mode((wind_width, wind_height))
+    hwnd = pygame.display.get_wm_info()['window']
+    move_wind_window_to_left_below_weather(hwnd, wind_width, wind_height)
+    pygame.display.set_caption('Wind Indicator')
+    clock = pygame.time.Clock()
+    wind_state = {'direction': (1, 0), 'speed': 1}
+    rotor_angle = 0.0
+
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT or (
+                event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
+            ):
+                pygame.quit()
+                return
+
+        while True:
+            try:
+                message = queue.get_nowait()
+            except Empty:
+                break
+            if message.get('close'):
+                pygame.quit()
+                return
+            wind_state.update(message)
+
+        delta_seconds = clock.tick(30) / 1000
+        speed = max(1, wind_state['speed'])
+        rotor_angle = (rotor_angle + delta_seconds * (1.4 + speed * 1.3)) % (2 * math.pi)
+
+        wind_screen.fill((24, 30, 40))
+        pygame.draw.rect(wind_screen, (95, 125, 150), wind_screen.get_rect(), 3)
+        title = pygame.font.Font(None, 36).render('WIND INDICATOR', True, (225, 235, 245))
+        wind_screen.blit(title, title.get_rect(center=(wind_width // 2, 30)))
+
+        vane_center = (92, 139)
+        vane_radius = 48
+        pygame.draw.circle(wind_screen, (95, 125, 150), vane_center, vane_radius, 1)
+        compass_font = pygame.font.Font(None, 20)
+        for label, position in (
+            ('N', (vane_center[0], vane_center[1] - vane_radius - 9)),
+            ('E', (vane_center[0] + vane_radius + 9, vane_center[1])),
+            ('S', (vane_center[0], vane_center[1] + vane_radius + 9)),
+            ('W', (vane_center[0] - vane_radius - 9, vane_center[1])),
+        ):
+            marker = compass_font.render(label, True, (180, 205, 225))
+            wind_screen.blit(marker, marker.get_rect(center=position))
+
+        dx, dy = wind_state['direction']
+        direction_length = math.hypot(dx, dy) or 1
+        direction_x = dx / direction_length
+        direction_y = dy / direction_length
+        vane_tip = (
+            int(vane_center[0] + direction_x * 34),
+            int(vane_center[1] + direction_y * 34),
+        )
+        pygame.draw.line(wind_screen, (235, 190, 95), vane_center, vane_tip, 5)
+        perpendicular = (-direction_y, direction_x)
+        arrow_base = (
+            vane_tip[0] - direction_x * 13,
+            vane_tip[1] - direction_y * 13,
+        )
+        arrowhead = [
+            vane_tip,
+            (
+                int(arrow_base[0] + perpendicular[0] * 8),
+                int(arrow_base[1] + perpendicular[1] * 8),
+            ),
+            (
+                int(arrow_base[0] - perpendicular[0] * 8),
+                int(arrow_base[1] - perpendicular[1] * 8),
+            ),
+        ]
+        pygame.draw.polygon(wind_screen, (235, 190, 95), arrowhead)
+        pygame.draw.circle(wind_screen, (225, 235, 245), vane_center, 5)
+
+        rotor_center = (266, 139)
+        rotor_radius = 39
+        for arm_index in range(3):
+            angle = rotor_angle + arm_index * (2 * math.pi / 3)
+            cup_position = (
+                int(rotor_center[0] + math.cos(angle) * rotor_radius),
+                int(rotor_center[1] + math.sin(angle) * rotor_radius),
+            )
+            pygame.draw.line(wind_screen, (180, 205, 225), rotor_center, cup_position, 3)
+            pygame.draw.circle(wind_screen, (110, 190, 205), cup_position, 8)
+            pygame.draw.circle(wind_screen, (225, 235, 245), cup_position, 8, 1)
+        pygame.draw.circle(wind_screen, (235, 190, 95), rotor_center, 7)
+
+        label_font = pygame.font.Font(None, 24)
+        for label, center in (
+            ('WIND VANE', (vane_center[0], 211)),
+            ('ANEMOMETER', (rotor_center[0], 211)),
+        ):
+            label_surface = label_font.render(label, True, (210, 225, 235))
+            wind_screen.blit(label_surface, label_surface.get_rect(center=center))
+
+        pygame.display.flip()
+
+
+def run_moon_window(queue):
+    window_width = 300
+    window_height = 280
+    moon_radius = 68
+
+    pygame.init()
+    moon_screen = pygame.display.set_mode((window_width, window_height))
+    hwnd = pygame.display.get_wm_info()['window']
+    move_moon_window_to_left_below_wind(hwnd, window_width, window_height)
+    pygame.display.set_caption('Moon Phase')
+    clock = pygame.time.Clock()
+    state = {'day': 1, 'phase': 0}
+    rendered_phase = None
+    moon_image = None
+
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT or (
+                event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
+            ):
+                pygame.quit()
+                return
+
+        while True:
+            try:
+                message = queue.get_nowait()
+            except Empty:
+                break
+            if message.get('close'):
+                pygame.quit()
+                return
+            state.update(message)
+
+        phase = state['phase'] % len(moon_phase_names)
+        if phase != rendered_phase:
+            diameter = moon_radius * 2
+            moon_image = pygame.Surface((diameter, diameter), pygame.SRCALPHA)
+            phase_angle = -math.pi + phase * math.pi / 4
+            for pixel_y in range(diameter):
+                y = (pixel_y + 0.5 - moon_radius) / moon_radius
+                for pixel_x in range(diameter):
+                    x = (pixel_x + 0.5 - moon_radius) / moon_radius
+                    if x * x + y * y > 1:
+                        continue
+                    depth = math.sqrt(1 - x * x - y * y)
+                    illuminated = depth * math.cos(phase_angle) - x * math.sin(phase_angle) > 0
+                    color = (235, 229, 198) if illuminated else (55, 63, 78)
+                    moon_image.set_at((pixel_x, pixel_y), color)
+            rendered_phase = phase
+
+        moon_screen.fill((18, 22, 32))
+        pygame.draw.rect(moon_screen, (90, 105, 130), moon_screen.get_rect(), 2)
+        title = pygame.font.Font(None, 34).render('MOON PHASE', True, (220, 230, 245))
+        moon_screen.blit(title, title.get_rect(center=(window_width // 2, 28)))
+        moon_screen.blit(
+            moon_image,
+            moon_image.get_rect(center=(window_width // 2, 132)),
+        )
+        phase_label = pygame.font.Font(None, 27).render(
+            moon_phase_names[phase],
+            True,
+            (235, 229, 198),
+        )
+        moon_screen.blit(phase_label, phase_label.get_rect(center=(window_width // 2, 222)))
+        day_label = pygame.font.Font(None, 22).render(
+            f"Day {state['day']}",
+            True,
+            (180, 195, 215),
+        )
+        moon_screen.blit(day_label, day_label.get_rect(center=(window_width // 2, 254)))
 
         pygame.display.flip()
         clock.tick(30)
@@ -2134,6 +2817,52 @@ def toggle_currency_window():
     send_currency_window_state()
 
 
+def toggle_player_status_window():
+    global player_status_window_process, player_status_window_queue
+    global player_status_command_queue, player_status_last_state
+
+    if player_status_window_process is not None and player_status_window_process.is_alive():
+        if player_status_window_queue is not None:
+            player_status_window_queue.put({'close': True})
+        player_status_window_process.join(timeout=0.2)
+        if player_status_window_process.is_alive():
+            player_status_window_process.terminate()
+            player_status_window_process.join(timeout=0.5)
+        player_status_window_process = None
+        player_status_window_queue = None
+        player_status_command_queue = None
+        player_status_last_state = None
+        return
+
+    player_status_window_queue = mp.Queue()
+    player_status_command_queue = mp.Queue()
+    player_status_last_state = None
+    player_status_window_process = mp.Process(
+        target=run_player_status_window,
+        args=(player_status_window_queue, player_status_command_queue),
+        daemon=True,
+    )
+    player_status_window_process.start()
+    send_player_status_window_state()
+
+
+def close_player_status_window():
+    global player_status_window_process, player_status_window_queue
+    global player_status_command_queue, player_status_last_state
+
+    if player_status_window_process is not None and player_status_window_process.is_alive():
+        if player_status_window_queue is not None:
+            player_status_window_queue.put({'close': True})
+        player_status_window_process.join(timeout=0.2)
+        if player_status_window_process.is_alive():
+            player_status_window_process.terminate()
+            player_status_window_process.join(timeout=0.5)
+    player_status_window_process = None
+    player_status_window_queue = None
+    player_status_command_queue = None
+    player_status_last_state = None
+
+
 def toggle_weather_window():
     global weather_window_process, weather_window_queue, weather_window_last_state
 
@@ -2158,6 +2887,58 @@ def toggle_weather_window():
     )
     weather_window_process.start()
     send_weather_window_state()
+
+
+def toggle_wind_window():
+    global wind_window_process, wind_window_queue, wind_window_last_state
+
+    if wind_window_process is not None and wind_window_process.is_alive():
+        if wind_window_queue is not None:
+            wind_window_queue.put({'close': True})
+        wind_window_process.join(timeout=0.2)
+        if wind_window_process.is_alive():
+            wind_window_process.terminate()
+            wind_window_process.join(timeout=0.5)
+        wind_window_process = None
+        wind_window_queue = None
+        wind_window_last_state = None
+        return
+
+    wind_window_queue = mp.Queue()
+    wind_window_last_state = None
+    wind_window_process = mp.Process(
+        target=run_wind_window,
+        args=(wind_window_queue,),
+        daemon=True,
+    )
+    wind_window_process.start()
+    send_wind_window_state()
+
+
+def toggle_moon_window():
+    global moon_window_process, moon_window_queue, moon_window_last_state
+
+    if moon_window_process is not None and moon_window_process.is_alive():
+        if moon_window_queue is not None:
+            moon_window_queue.put({'close': True})
+        moon_window_process.join(timeout=0.2)
+        if moon_window_process.is_alive():
+            moon_window_process.terminate()
+            moon_window_process.join(timeout=0.5)
+        moon_window_process = None
+        moon_window_queue = None
+        moon_window_last_state = None
+        return
+
+    moon_window_queue = mp.Queue()
+    moon_window_last_state = None
+    moon_window_process = mp.Process(
+        target=run_moon_window,
+        args=(moon_window_queue,),
+        daemon=True,
+    )
+    moon_window_process.start()
+    send_moon_window_state()
 
 
 def send_secondary_window_state():
@@ -2204,6 +2985,7 @@ def send_debug_card_window_state(rejected_card_id=None, status=None):
     message = {
         'cards': [card.display_data() for card in debug_cards],
         'turn': current_turn,
+        'day': weather_day,
         'status': status or 'Click a card to play it for the current player.',
     }
     if rejected_card_id is not None:
@@ -2234,6 +3016,26 @@ def send_currency_window_state():
     }, block=False)
 
 
+def send_player_status_window_state():
+    global player_status_last_state
+    if player_status_window_queue is None or player_status_window_process is None:
+        return
+    if not player_status_window_process.is_alive():
+        return
+    target = 'black' if current_turn == 'white' else 'white'
+    state = {
+        'health': player_health.copy(),
+        'turn': current_turn,
+        'can_attack': can_attack_player(selected_piece, target),
+        'game_over': game_over,
+        'winner': winner,
+    }
+    if state == player_status_last_state:
+        return
+    player_status_window_queue.put(state, block=False)
+    player_status_last_state = state
+
+
 def send_weather_window_state():
     global weather_window_last_state
     if weather_window_queue is None or weather_window_process is None:
@@ -2254,6 +3056,163 @@ def send_weather_window_state():
     weather_window_last_state = state
 
 
+def send_wind_window_state():
+    global wind_window_last_state
+    if wind_window_queue is None or wind_window_process is None:
+        return
+    if not wind_window_process.is_alive():
+        return
+
+    sky_stage = stage_names.index('sky')
+    cave_stage = stage_names.index('caves')
+    storm_active = (
+        get_weather_effect(sky_stage, 'storm_clouds') is not None
+        and storm_wind_direction is not None
+    )
+    barometric_winds_active = (
+        get_weather_effect(cave_stage, 'barometric_winds') is not None
+    )
+    if storm_active:
+        dx, dy = storm_wind_direction
+        speed = storm_wind_speed
+    else:
+        dx, dy = ambient_wind_direction
+        speed = ambient_wind_speed
+    if (storm_active and sky_stage in rotated_stages) or (
+        not storm_active and barometric_winds_active and cave_stage in rotated_stages
+    ):
+        dx, dy = -dx, -dy
+    state = {
+        'direction': (dx, dy),
+        'speed': speed,
+    }
+    if state == wind_window_last_state:
+        return
+    wind_window_queue.put(state, block=False)
+    wind_window_last_state = state
+
+
+def send_moon_window_state():
+    global moon_window_last_state
+    if moon_window_queue is None or moon_window_process is None:
+        return
+    if not moon_window_process.is_alive():
+        return
+    state = {
+        'day': weather_day,
+        'phase': (weather_day - 1) % len(moon_phase_names),
+    }
+    if state == moon_window_last_state:
+        return
+    moon_window_queue.put(state, block=False)
+    moon_window_last_state = state
+
+
+def get_promotion_shop_options(color):
+    options = []
+    for piece_type in promotion_piece_types:
+        piece = getattr(piece_data, piece_type)(color)
+        options.append({
+            'name': piece_type,
+            'symbol': piece.symbol,
+            'price': piece.value,
+        })
+    return options
+
+
+def send_promotion_shop_state():
+    if (
+        promotion_shop_queue is None
+        or promotion_shop_process is None
+        or not promotion_shop_process.is_alive()
+        or pending_promotion_piece is None
+    ):
+        return
+    color = pending_promotion_piece.color
+    promotion_shop_queue.put({
+        'player': color,
+        'gold': currencies[color]['gold'],
+        'options': get_promotion_shop_options(color),
+    }, block=False)
+
+
+def close_promotion_shop():
+    global promotion_shop_process, promotion_shop_queue, promotion_shop_command_queue
+
+    if promotion_shop_process is not None and promotion_shop_process.is_alive():
+        if promotion_shop_queue is not None:
+            promotion_shop_queue.put({'close': True})
+        promotion_shop_process.join(timeout=0.2)
+        if promotion_shop_process.is_alive():
+            promotion_shop_process.terminate()
+            promotion_shop_process.join(timeout=0.5)
+    promotion_shop_process = None
+    promotion_shop_queue = None
+    promotion_shop_command_queue = None
+
+
+def ensure_promotion_shop_window():
+    global promotion_shop_process, promotion_shop_queue, promotion_shop_command_queue
+
+    if pending_promotion_piece is None:
+        return
+    if promotion_shop_process is not None and promotion_shop_process.is_alive():
+        return
+    if promotion_shop_process is not None:
+        promotion_shop_process.join(timeout=0.1)
+    promotion_shop_queue = mp.Queue()
+    promotion_shop_command_queue = mp.Queue()
+    promotion_shop_process = mp.Process(
+        target=run_promotion_shop_window,
+        args=(promotion_shop_queue, promotion_shop_command_queue),
+        daemon=True,
+    )
+    promotion_shop_process.start()
+    send_promotion_shop_state()
+
+
+def process_promotion_shop_commands(pieces):
+    global pending_promotion_piece
+
+    if promotion_shop_command_queue is None or pending_promotion_piece is None:
+        return
+    while True:
+        try:
+            command = promotion_shop_command_queue.get_nowait()
+        except Empty:
+            break
+
+        if command.get('action') != 'promote':
+            continue
+        piece_type = command.get('piece_type')
+        if piece_type not in promotion_piece_types:
+            continue
+
+        pawn = pending_promotion_piece
+        if pawn not in pieces:
+            pending_promotion_piece = None
+            close_promotion_shop()
+            return
+
+        promoted_piece = getattr(piece_data, piece_type)(pawn.color)
+        price = promoted_piece.value
+        if currencies[pawn.color]['gold'] < price:
+            send_promotion_shop_state()
+            continue
+
+        currencies[pawn.color]['gold'] -= price
+        piece_index = pieces.index(pawn)
+        promoted_piece.position = pawn.position
+        promoted_piece.stage = pawn.stage
+        promoted_piece.has_moved = True
+        pieces[piece_index] = promoted_piece
+        pending_promotion_piece = None
+        close_promotion_shop()
+        send_currency_window_state()
+        finish_board_action(pieces, pawn.color)
+        return
+
+
 def use_card_from_hand(player, card_id, debug=False):
     global cancel_played_this_turn
 
@@ -2270,6 +3229,7 @@ def use_card_from_hand(player, card_id, debug=False):
             and (player != current_turn or cancel_played_this_turn)
         )
         or (is_king_of_hearts(card) and get_untransformed_king(board_pieces, player) is None)
+        or (is_queen_of_clubs(card) and get_player_queen(board_pieces, player) is None)
         or not card.use()
     ):
         return False
@@ -2279,6 +3239,8 @@ def use_card_from_hand(player, card_id, debug=False):
         award_gold(player, 50)
     if getattr(card, 'suit', None) == 'Clubs' and getattr(card, 'rank', None) == 'K':
         expand_stage(current_stage)
+    if is_queen_of_clubs(card):
+        activate_queen_of_clubs(board_pieces, player)
     if getattr(card, 'action', None) == 'reverse':
         reverse_stage_colors(reverse_card_stages[card.color])
     if not debug:
@@ -2320,7 +3282,12 @@ def process_debug_card_window_commands():
             command = debug_card_command_queue.get_nowait()
         except Empty:
             return
-        if command.get('action') == 'debug_play_card':
+        if command.get('action') == 'skip_weather_day':
+            advance_weather_day()
+            send_debug_card_window_state(
+                status=f'Skipped ahead to {get_weekday_name()} (day {weather_day}).',
+            )
+        elif command.get('action') == 'debug_play_card':
             card_id = command.get('card_id')
             if not use_card_from_hand(current_turn, card_id, debug=True):
                 send_debug_card_window_state(
@@ -2329,11 +3296,40 @@ def process_debug_card_window_commands():
                 )
 
 
+def process_player_status_window_commands(pieces):
+    global selected_piece
+
+    if player_status_command_queue is None:
+        return
+    while True:
+        try:
+            command = player_status_command_queue.get_nowait()
+        except Empty:
+            return
+        if command.get('action') != 'attack_player':
+            continue
+        target = command.get('target')
+        if target not in ('white', 'black') or not can_attack_player(selected_piece, target):
+            continue
+
+        attacker_color = current_turn
+        player_health[target] = max(0, player_health[target] - player_attack_damage)
+        selected_piece = None
+        update_winner_if_no_kings(pieces)
+        if not game_over:
+            finish_board_action(pieces, attacker_color)
+        send_player_status_window_state()
+
+
 def begin_turn(color):
     global current_turn, cancel_played_this_turn
+    if game_over:
+        return
     if skipped_turns[color] > 0:
         skipped_turns[color] -= 1
         advance_stormy_turn(color, board_pieces)
+        if game_over:
+            return
         advance_weather_turn(color)
         next_color = 'black' if color == 'white' else 'white'
         begin_turn(next_color)
@@ -2368,18 +3364,42 @@ def draw_piece(piece, x=None, y=None):
         text = font.render(piece.symbol, True, color)
         if getattr(piece, 'is_astral_projection', False):
             text.set_alpha(135)
-        rotated_text = pygame.transform.rotate(text, rotation)
-        text_rect = rotated_text.get_rect(center=(center_x, center_y))
-        screen.blit(rotated_text, text_rect)
+        rendered_piece = pygame.transform.rotate(text, rotation)
+        piece_rect = rendered_piece.get_rect(center=(center_x, center_y))
     else:
         image = piece.image
         if getattr(piece, 'is_astral_projection', False):
             image = piece.image.copy()
             image.set_alpha(135)
-        rotated_image = pygame.transform.rotate(image, rotation)
-        image_rect = rotated_image.get_rect(center=(center_x, center_y))
-        screen.blit(rotated_image, image_rect.topleft)
-    draw_piece_shock(piece, (center_x, center_y))
+        rendered_piece = pygame.transform.rotate(image, rotation)
+        piece_rect = rendered_piece.get_rect(center=(center_x, center_y))
+    screen.blit(rendered_piece, piece_rect)
+    if isinstance(piece, piece_data.Bishop) and get_weekday_name() == 'Sunday':
+        piece_mask = pygame.mask.from_surface(rendered_piece)
+        for component in piece_mask.connected_components():
+            outline = component.outline()
+            if len(outline) > 2:
+                pygame.draw.lines(
+                    screen,
+                    (255, 215, 0),
+                    True,
+                    [(piece_rect.x + point[0], piece_rect.y + point[1]) for point in outline],
+                    3,
+                )
+
+
+def draw_piece_health_bar(piece, center_x, center_y):
+    bar_width = 68
+    bar_height = 8
+    bar_x = center_x - bar_width // 2
+    bar_y = center_y + square_size // 2 - bar_height
+    hp_ratio = max(0, min(1, piece.hp / piece.max_hp))
+    if hp_ratio:
+        pygame.draw.rect(
+            screen,
+            (70, 200, 90),
+            (bar_x, bar_y, round(bar_width * hp_ratio), bar_height),
+        )
 
 
 def draw_all_pieces(pieces):
@@ -2390,6 +3410,16 @@ def draw_all_pieces(pieces):
     for hallucination in crystal_haze_hallucinations:
         if hallucination.stage == current_stage:
             draw_piece(hallucination, *hallucination.position)
+    if (
+        inspected_piece is not None
+        and inspected_piece.stage == current_stage
+        and (inspected_piece in pieces or inspected_piece in crystal_haze_hallucinations)
+    ):
+        x, y = get_display_square(inspected_piece.position, inspected_piece.stage)
+        x -= get_board_scroll_offset(inspected_piece.stage)
+        if 0 <= x < screen.get_width() // square_size:
+            center = (x * square_size + square_size // 2, y * square_size + square_size // 2)
+            draw_piece_health_bar(inspected_piece, *center)
 
 
 def draw_storm_clouds():
@@ -2400,6 +3430,12 @@ def draw_storm_clouds():
     if not storm_cloud_tiles:
         return
 
+    storm_active = get_weather_effect(sky_stage, 'storm_clouds') is not None
+    cloud_colors = (
+        ((25, 29, 43, 220), (34, 39, 56, 235), (30, 35, 51, 240), (25, 29, 43, 225), (17, 20, 31, 170))
+        if storm_active
+        else ((125, 140, 155, 190), (160, 175, 190, 205), (145, 160, 175, 215), (125, 140, 155, 195), (90, 105, 120, 130))
+    )
     scroll_offset = get_board_scroll_offset(sky_stage)
     for square in storm_cloud_tiles:
         display_x, display_y = get_display_square(square, sky_stage)
@@ -2407,39 +3443,12 @@ def draw_storm_clouds():
         if not 0 <= display_x < screen.get_width() // square_size:
             continue
         cloud_surface = pygame.Surface((square_size, square_size), pygame.SRCALPHA)
-        pygame.draw.ellipse(cloud_surface, (25, 29, 43, 220), (5, 34, 91, 46))
-        pygame.draw.ellipse(cloud_surface, (34, 39, 56, 235), (15, 22, 37, 43))
-        pygame.draw.ellipse(cloud_surface, (30, 35, 51, 240), (37, 12, 42, 52))
-        pygame.draw.ellipse(cloud_surface, (25, 29, 43, 225), (61, 25, 34, 41))
-        pygame.draw.ellipse(cloud_surface, (17, 20, 31, 170), (10, 63, 80, 22))
+        pygame.draw.ellipse(cloud_surface, cloud_colors[0], (5, 34, 91, 46))
+        pygame.draw.ellipse(cloud_surface, cloud_colors[1], (15, 22, 37, 43))
+        pygame.draw.ellipse(cloud_surface, cloud_colors[2], (37, 12, 42, 52))
+        pygame.draw.ellipse(cloud_surface, cloud_colors[3], (61, 25, 34, 41))
+        pygame.draw.ellipse(cloud_surface, cloud_colors[4], (10, 63, 80, 22))
         screen.blit(cloud_surface, (display_x * square_size, display_y * square_size))
-
-
-def draw_piece_shock(piece, center):
-    source = getattr(piece, 'hallucination_source', piece)
-    shock = storm_shocked_pieces.get(id(source))
-    if shock is None:
-        shock = storm_shocked_pieces.get(id(piece))
-    if shock is None:
-        return
-
-    center_x, center_y = center
-    phase = pygame.time.get_ticks() // 85
-    pulse = phase % 2
-    glow = (255, 235, 110) if pulse else (140, 225, 255)
-    radius = 39 + (phase % 3) * 2
-    pygame.draw.circle(screen, glow, center, radius, 2)
-    offset = (phase % 5) * 2
-    bolt_points = [
-        (center_x + 24 + offset, center_y - 40),
-        (center_x + 13, center_y - 19),
-        (center_x + 27 + offset, center_y - 15),
-        (center_x + 6, center_y + 10),
-        (center_x + 15, center_y - 8),
-        (center_x + 3, center_y - 12),
-        (center_x + 24 + offset, center_y - 40),
-    ]
-    pygame.draw.lines(screen, (255, 250, 190), False, bolt_points, 3)
 
 
 def get_clicked_piece(mouse_pos, pieces):
@@ -2465,8 +3474,66 @@ def get_clicked_piece(mouse_pos, pieces):
     return candidates[0] if candidates else None
 
 
+def get_inspected_piece(mouse_pos, pieces):
+    clicked_square = get_square_from_mouse(mouse_pos)
+    if clicked_square is None:
+        return None
+
+    pieces = get_pieces_with_hallucinations(pieces)
+    candidates = [
+        piece for piece in reversed(pieces)
+        if piece.stage == current_stage
+        and piece.position == clicked_square
+        and (
+            piece.color == current_turn
+            or not is_square_hidden_by_fog(clicked_square, current_turn, current_stage)
+        )
+    ]
+    for piece in candidates:
+        if not getattr(piece, 'is_astral_projection', False):
+            return piece
+    return candidates[0] if candidates else None
+
+
 def is_king_of_hearts(card):
     return getattr(card, 'suit', None) == 'Hearts' and getattr(card, 'rank', None) == 'K'
+
+
+def is_queen_of_clubs(card):
+    return getattr(card, 'suit', None) == 'Clubs' and getattr(card, 'rank', None) == 'Q'
+
+
+def get_player_queen(pieces, color):
+    return next(
+        (
+            piece for piece in pieces
+            if isinstance(piece, piece_data.Queen) and piece.color == color
+        ),
+        None,
+    )
+
+
+def activate_queen_of_clubs(pieces, color):
+    queen = get_player_queen(pieces, color)
+    if queen is None:
+        return False
+
+    x, y = queen.position
+    for dx, dy in (
+        (-1, -1), (0, -1), (1, -1),
+        (-1, 0),             (1, 0),
+        (-1, 1),  (0, 1),   (1, 1),
+    ):
+        square = (x + dx, y + dy)
+        if (
+            in_bounds(square, queen.stage)
+            and get_piece_at_square(pieces, square, queen.stage) is None
+        ):
+            pawn = piece_data.Pawn(color)
+            pawn.position = square
+            pawn.stage = queen.stage
+            pieces.append(pawn)
+    return True
 
 
 def get_untransformed_king(pieces, color):
@@ -2521,6 +3588,84 @@ def end_astral_projection(projection, pieces):
     del projection.astral_turns_remaining
 
 
+def damage_piece(piece, amount, pieces):
+    piece.hp = max(0, piece.hp - amount)
+    if piece.hp > 0:
+        return False
+
+    if getattr(piece, 'is_astral_projection', False):
+        projection = piece
+    elif getattr(piece, 'is_vulnerable_body', False):
+        projection = next(
+            (
+                candidate for candidate in pieces
+                if getattr(candidate, 'is_astral_projection', False)
+                and getattr(candidate, 'astral_body', None) is piece
+            ),
+            None,
+        )
+    else:
+        projection = None
+
+    if projection is not None:
+        body = getattr(projection, 'astral_body', None)
+        end_astral_projection(projection, pieces)
+        if projection in pieces:
+            pieces.remove(projection)
+        remove_piece_hallucinations(projection)
+        if body is not None:
+            remove_piece_hallucinations(body)
+
+    if piece in pieces:
+        pieces.remove(piece)
+    remove_piece_hallucinations(piece)
+    return True
+
+
+def can_attack_player(piece, target_player):
+    if (
+        piece is None
+        or target_player not in ('white', 'black')
+        or target_player == current_turn
+        or game_over
+        or piece not in board_pieces
+        or piece.color != current_turn
+        or piece.trapped_until > 0
+        or getattr(piece, 'is_hallucination', False)
+        or getattr(piece, 'is_vulnerable_body', False)
+    ):
+        return False
+    opponent_back_rank = grid_size - 1 if target_player == 'white' else 0
+    return piece.position[1] == opponent_back_rank
+
+
+def update_winner_if_no_kings(pieces):
+    global winner, game_over
+
+    if player_health['white'] <= 0:
+        winner = 'black'
+        game_over = True
+        return
+    if player_health['black'] <= 0:
+        winner = 'white'
+        game_over = True
+        return
+
+    remaining_kings = {
+        piece.color
+        for piece in pieces
+        if piece.__class__.__name__ == 'King'
+        and not getattr(piece, 'is_vulnerable_body', False)
+        and not getattr(piece, 'is_hallucination', False)
+    }
+    if 'white' not in remaining_kings:
+        winner = 'black'
+        game_over = True
+    elif 'black' not in remaining_kings:
+        winner = 'white'
+        game_over = True
+
+
 def advance_astral_projection_turns(color, pieces):
     for piece in pieces[:]:
         if (
@@ -2545,6 +3690,8 @@ def finish_board_action(pieces, ended_turn):
                     piece.web_square = None
     advance_astral_projection_turns(ended_turn, pieces)
     advance_stormy_turn(ended_turn, pieces)
+    if game_over:
+        return
     advance_weather_turn(ended_turn)
     begin_turn('black' if ended_turn == 'white' else 'white')
 
@@ -2582,6 +3729,7 @@ def finish_hallucination_action(pieces, selected_hallucination, target_square=No
 
 def move_selected_piece_to(target_square, pieces, target_stage=None):
     global selected_piece, current_turn, last_move, en_passant_target, winner, game_over, current_stage
+    global pending_promotion_piece
 
     if selected_piece is None or game_over:
         return
@@ -2616,11 +3764,8 @@ def move_selected_piece_to(target_square, pieces, target_stage=None):
                 target_piece = get_piece_at_square(pieces, destination_square, resolved_target_stage)
                 if target_piece is not None and target_piece.color != selected_piece.color:
                     award_gold(selected_piece.color, target_piece.value)
-                    if target_piece.__class__.__name__ == 'King':
-                        winner = selected_piece.color
-                        game_over = True
-                    pieces.remove(target_piece)
-                    remove_piece_hallucinations(target_piece)
+                    damage_piece(target_piece, 999, pieces)
+                    update_winner_if_no_kings(pieces)
                 selected_piece.position = destination_square
                 selected_piece.stage = resolved_target_stage
                 current_stage = resolved_target_stage
@@ -2667,16 +3812,12 @@ def move_selected_piece_to(target_square, pieces, target_stage=None):
         captured_pawn = get_piece_at_square(pieces, captured_pawn_square, selected_piece.stage)
         if captured_pawn is not None:
             award_gold(selected_piece.color, captured_pawn.value)
-            pieces.remove(captured_pawn)
-            remove_piece_hallucinations(captured_pawn)
+            damage_piece(captured_pawn, 999, pieces)
 
     if target_piece is not None and target_piece.color != selected_piece.color:
         award_gold(selected_piece.color, target_piece.value)
-        if target_piece.__class__.__name__ == 'King':
-            winner = selected_piece.color
-            game_over = True
-        pieces.remove(target_piece)
-        remove_piece_hallucinations(target_piece)
+        damage_piece(target_piece, 999, pieces)
+        update_winner_if_no_kings(pieces)
 
     if selected_piece.__class__.__name__ == 'King' and abs(target_square[0] - start_square[0]) == 2:
         rook_start = (0, start_square[1]) if target_square[0] < start_square[0] else (7, start_square[1])
@@ -2709,6 +3850,18 @@ def move_selected_piece_to(target_square, pieces, target_stage=None):
             selected_piece.web_square = selected_piece.position
             web_tiles.pop(web_key, None)
 
+    if (
+        selected_piece.__class__.__name__ == 'Pawn'
+        and target_square[1] == (0 if selected_piece.color == 'white' else grid_size - 1)
+        and not game_over
+    ):
+        pending_promotion_piece = selected_piece
+        selected_piece = None
+        en_passant_target = None
+        ensure_promotion_shop_window()
+        send_promotion_shop_state()
+        return
+    
     if selected_piece.__class__.__name__ == 'Pawn' and abs(target_square[1] - start_square[1]) == 2:
         en_passant_target = (target_square[0], (start_square[1] + target_square[1]) // 2)
 
@@ -2734,7 +3887,8 @@ begin_turn('white')
 
 
 def main():
-    global selected_piece, current_turn, last_move, en_passant_target, winner, game_over, board_pieces, current_stage
+    global selected_piece, inspected_piece, current_turn, last_move, en_passant_target, winner, game_over, board_pieces, current_stage
+    global pending_promotion_piece
 
     running = True
     while running:
@@ -2755,8 +3909,17 @@ def main():
                     toggle_currency_window()
                 elif event.key == pygame.K_8:
                     toggle_weather_window()
+                elif event.key == pygame.K_9:
+                    toggle_wind_window()
+                elif event.key == pygame.K_o:
+                    toggle_moon_window()
+                elif event.key == pygame.K_p:
+                    toggle_player_status_window()
                 elif event.key == pygame.K_r:
+                    pending_promotion_piece = None
+                    close_promotion_shop()
                     selected_piece = None
+                    inspected_piece = None
                     current_turn = 'white'
                     last_move = None
                     en_passant_target = None
@@ -2779,7 +3942,18 @@ def main():
                     current_stage = normalize_stage_index(current_stage - 1)
                 elif not game_over and event.key == pygame.K_DOWN:
                     current_stage = normalize_stage_index(current_stage + 1)
-            elif not game_over and event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            elif (
+                event.type == pygame.MOUSEBUTTONDOWN
+                and event.button == 3
+            ):
+                inspected_piece = get_inspected_piece(event.pos, board_pieces)
+            elif (
+                not game_over
+                and pending_promotion_piece is None
+                and event.type == pygame.MOUSEBUTTONDOWN
+                and event.button == 1
+            ):
+                inspected_piece = None
                 clicked_square = get_square_from_mouse(event.pos)
                 clicked_piece = get_clicked_piece(event.pos, board_pieces)
 
@@ -2801,17 +3975,27 @@ def main():
 
         process_hand_window_commands()
         process_debug_card_window_commands()
+        process_player_status_window_commands(board_pieces)
+        process_promotion_shop_commands(board_pieces)
+        ensure_promotion_shop_window()
         current_stage = normalize_stage_index(current_stage)
         send_secondary_window_state()
         send_pile_window_state()
+        send_player_status_window_state()
         send_weather_window_state()
+        send_wind_window_state()
+        send_moon_window_state()
         draw_board()
         draw_storm_clouds()
         draw_all_pieces(board_pieces)
         draw_fog_of_war()
+        draw_daylight_overlay()
         draw_game_over_overlay()
         pygame.display.flip()
 
+    pending_promotion_piece = None
+    close_promotion_shop()
+    close_player_status_window()
     pygame.quit()
 
 

@@ -2,7 +2,7 @@ WEATHER_CONDITIONS_BY_STAGE = {
     'sky': ('Sunny', 'Cloudy', 'Rainy', 'Windy', 'Snowy', 'Foggy', 'Stormy'),
     'plains': ('Sunny', 'Cloudy', 'Rainy', 'Windy', 'Drought', 'Thunderstorm', 'Foggy'),
     'tunnels': ('Dripping', 'Damp Mist', 'Cold Draft', 'Underground Rain', 'Still Air', 'Foggy'),
-    'caves': ('Dustfall', 'Cold', 'Stone Hail', 'Crystal Haze', 'Dripping', 'Cave Fog'),
+    'caves': ('Dustfall', 'Cold', 'Barometric Winds', 'Crystal Haze', 'Dripping', 'Cave Fog'),
 }
 
 WEATHER_EFFECTS_BY_STAGE = {
@@ -12,11 +12,14 @@ WEATHER_EFFECTS_BY_STAGE = {
             'clump_count': 4,
             'clump_min_tiles': 3,
             'clump_max_tiles': 6,
-            'turns_before_shock': 1,
-            'shock_duration_turns': 4,
         },
     },
     'caves': {
+        'Barometric Winds': {
+            'type': 'barometric_winds',
+            'direction_source': 'ambient_wind_direction',
+            'distance_source': 'ambient_wind_speed',
+        },
         'Cave Fog': {
             'type': 'fog_of_war',
             'visibility_distance': 1,
