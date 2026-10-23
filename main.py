@@ -20,6 +20,7 @@ expanded_left_columns = expanded_grid_width // 2
 square_size = 100
 hand_size_limit = 8
 player_attack_damage = 1
+starting_player_health = 100
 hand_card_width = 96
 hand_card_height = 106
 hand_card_gap = 8
@@ -40,8 +41,15 @@ stages = {
     'caves': (colors['light_grey'], colors['dark_grey']),
 }
 stage_names = list(stages.keys())
-church_stage_colors = ((205, 190, 160), (104, 87, 78))
 weekday_names = ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+season_names = ('Spring', 'Summer', 'Fall', 'Winter')
+season_length_days = 7
+seasonal_plains_colors = (
+    ((145, 205, 105), (85, 155, 65)),
+    ((195, 205, 95), (139, 158, 55)),
+    ((190, 105, 80), (135, 62, 55)),
+    ((225, 230, 235), (155, 172, 190)),
+)
 moon_phase_names = (
     'New Moon',
     'Waxing Crescent',
@@ -68,19 +76,31 @@ def normalize_stage_index(value):
     return value
 
 
-def is_sunday_church_stage(stage_index=None):
-    if stage_index is None:
-        stage_index = current_stage
-    return (
-        normalize_stage_index(stage_index) == stage_names.index('plains')
-        and get_weekday_name() == 'Sunday'
-    )
-
-
 def get_weekday_name(day_number=None):
     if day_number is None:
         day_number = weather_day
     return weekday_names[(day_number - 1) % len(weekday_names)]
+
+
+def get_season_index(day_number=None):
+    if day_number is None:
+        day_number = weather_day
+    return ((max(1, int(day_number)) - 1) // season_length_days) % len(season_names)
+
+
+def get_season_day(day_number=None):
+    if day_number is None:
+        day_number = weather_day
+    return (max(1, int(day_number)) - 1) % season_length_days + 1
+
+
+def get_stage_colors(stage_index=None, day_number=None):
+    if stage_index is None:
+        stage_index = current_stage
+    stage_index = normalize_stage_index(stage_index)
+    if stage_index == stage_names.index('plains'):
+        return seasonal_plains_colors[get_season_index(day_number)]
+    return stages[stage_names[stage_index]]
 
 
 current_stage = normalize_stage_index(1)
@@ -109,6 +129,9 @@ currency_window_queue = None
 weather_window_process = None
 weather_window_queue = None
 weather_window_last_state = None
+calendar_window_process = None
+calendar_window_queue = None
+calendar_window_last_state = None
 wind_window_process = None
 wind_window_queue = None
 wind_window_last_state = None
@@ -214,6 +237,7 @@ def reset_card_game():
         weather_forecasts[stage] = [create_weather_forecast(stage) for _ in range(7)]
     send_currency_window_state()
     send_weather_window_state()
+    send_calendar_window_state()
     send_wind_window_state()
 
 
@@ -233,6 +257,7 @@ def advance_weather_day():
         forecast.append(create_weather_forecast(stage))
     weather_turn_counts.update({'white': 0, 'black': 0})
     send_weather_window_state()
+    send_calendar_window_state()
     send_wind_window_state()
 
 
@@ -1210,11 +1235,7 @@ def draw_board():
     board_width = get_visible_board_width()
     scroll_offset = get_board_scroll_offset()
     stage_index = normalize_stage_index(current_stage)
-    tile_colors = (
-        church_stage_colors
-        if is_sunday_church_stage(stage_index)
-        else stages[stage_names[stage_index]]
-    )
+    tile_colors = get_stage_colors(stage_index)
     for i in range(board_width):
         for j in range(grid_size):
             board_x = i + scroll_offset
@@ -1438,6 +1459,15 @@ def move_weather_window_to_left_top(hwnd, width, height):
     ctypes.windll.user32.MoveWindow(hwnd, 20, 20, width, height, True)
 
 
+def move_calendar_window_to_right_top(hwnd, width, height):
+    if hwnd is None:
+        return
+    user32 = ctypes.windll.user32
+    screen_width = user32.GetSystemMetrics(0)
+    x = max(20, screen_width - width - 20)
+    user32.MoveWindow(hwnd, x, 20, width, height, True)
+
+
 def move_wind_window_to_left_below_weather(hwnd, width, height):
     if hwnd is None:
         return
@@ -1451,12 +1481,7 @@ def move_moon_window_to_left_below_wind(hwnd, width, height):
 
 
 def get_stage_light_color(stage_index=None):
-    if stage_index is None:
-        stage_index = current_stage
-    stage_index = normalize_stage_index(stage_index)
-    if is_sunday_church_stage(stage_index):
-        return church_stage_colors[0]
-    return stages[stage_names[stage_index]][0]
+    return get_stage_colors(stage_index)[0]
 
 
 def draw_ability_tag(info_screen, ability, y, info_width):
@@ -2535,6 +2560,115 @@ def run_weather_window(queue):
         clock.tick(30)
 
 
+def run_calendar_window(queue):
+    tile_width = 94
+    tile_height = 112
+    tile_gap = 8
+    margin = 18
+    window_width = margin * 2 + len(weekday_names) * tile_width + (len(weekday_names) - 1) * tile_gap
+    window_height = 244
+
+    pygame.init()
+    calendar_screen = pygame.display.set_mode((window_width, window_height))
+    hwnd = pygame.display.get_wm_info()['window']
+    move_calendar_window_to_right_top(hwnd, window_width, window_height)
+    pygame.display.set_caption('Season Calendar')
+    clock = pygame.time.Clock()
+    state = {
+        'day': 1,
+        'season': season_names[0],
+        'season_day': 1,
+        'colors': seasonal_plains_colors[0],
+    }
+
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT or (
+                event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
+            ):
+                pygame.quit()
+                return
+
+        while True:
+            try:
+                message = queue.get_nowait()
+            except Empty:
+                break
+            if message.get('close'):
+                pygame.quit()
+                return
+            state.update(message)
+
+        calendar_screen.fill((24, 30, 40))
+        pygame.draw.rect(calendar_screen, (95, 125, 150), calendar_screen.get_rect(), 3)
+        title = pygame.font.Font(None, 36).render('SEASON CALENDAR', True, (225, 235, 245))
+        calendar_screen.blit(title, title.get_rect(center=(window_width // 2, 30)))
+        season_label = pygame.font.Font(None, 28).render(
+            f"{state['season'].upper()} - DAY {state['season_day']} OF {season_length_days}",
+            True,
+            (235, 210, 135),
+        )
+        calendar_screen.blit(season_label, season_label.get_rect(center=(window_width // 2, 66)))
+
+        season_start_day = state['day'] - state['season_day'] + 1
+        light_color, dark_color = state['colors']
+        for index in range(len(weekday_names)):
+            tile_x = margin + index * (tile_width + tile_gap)
+            tile_rect = pygame.Rect(tile_x, 94, tile_width, tile_height)
+            is_today = index + 1 == state['season_day']
+            pygame.draw.rect(
+                calendar_screen,
+                (65, 78, 60) if is_today else (45, 54, 66),
+                tile_rect,
+                border_radius=7,
+            )
+            pygame.draw.rect(
+                calendar_screen,
+                (235, 195, 95) if is_today else (105, 125, 145),
+                tile_rect,
+                2 if is_today else 1,
+                border_radius=7,
+            )
+            weekday = get_weekday_name(season_start_day + index)
+            weekday_label = pygame.font.Font(None, 21).render(
+                weekday[:3].upper(),
+                True,
+                (245, 245, 245),
+            )
+            calendar_screen.blit(
+                weekday_label,
+                weekday_label.get_rect(center=(tile_rect.centerx, tile_rect.y + 23)),
+            )
+            day_label = pygame.font.Font(None, 20).render(
+                f"Day {index + 1}",
+                True,
+                (210, 220, 230),
+            )
+            calendar_screen.blit(
+                day_label,
+                day_label.get_rect(center=(tile_rect.centerx, tile_rect.y + 52)),
+            )
+            swatch_size = 22
+            swatch_gap = 6
+            swatch_left = tile_rect.centerx - swatch_size - swatch_gap // 2
+            swatch_y = tile_rect.y + 73
+            pygame.draw.rect(
+                calendar_screen,
+                light_color,
+                (swatch_left, swatch_y, swatch_size, swatch_size),
+                border_radius=3,
+            )
+            pygame.draw.rect(
+                calendar_screen,
+                dark_color,
+                (swatch_left + swatch_size + swatch_gap, swatch_y, swatch_size, swatch_size),
+                border_radius=3,
+            )
+
+        pygame.display.flip()
+        clock.tick(30)
+
+
 def run_wind_window(queue):
     wind_width = 360
     wind_height = 240
@@ -2889,6 +3023,32 @@ def toggle_weather_window():
     send_weather_window_state()
 
 
+def toggle_calendar_window():
+    global calendar_window_process, calendar_window_queue, calendar_window_last_state
+
+    if calendar_window_process is not None and calendar_window_process.is_alive():
+        if calendar_window_queue is not None:
+            calendar_window_queue.put({'close': True})
+        calendar_window_process.join(timeout=0.2)
+        if calendar_window_process.is_alive():
+            calendar_window_process.terminate()
+            calendar_window_process.join(timeout=0.5)
+        calendar_window_process = None
+        calendar_window_queue = None
+        calendar_window_last_state = None
+        return
+
+    calendar_window_queue = mp.Queue()
+    calendar_window_last_state = None
+    calendar_window_process = mp.Process(
+        target=run_calendar_window,
+        args=(calendar_window_queue,),
+        daemon=True,
+    )
+    calendar_window_process.start()
+    send_calendar_window_state()
+
+
 def toggle_wind_window():
     global wind_window_process, wind_window_queue, wind_window_last_state
 
@@ -3054,6 +3214,25 @@ def send_weather_window_state():
         return
     weather_window_queue.put(state, block=False)
     weather_window_last_state = state
+
+
+def send_calendar_window_state():
+    global calendar_window_last_state
+    if calendar_window_queue is None or calendar_window_process is None:
+        return
+    if not calendar_window_process.is_alive():
+        return
+    season_index = get_season_index()
+    state = {
+        'day': weather_day,
+        'season': season_names[season_index],
+        'season_day': get_season_day(),
+        'colors': seasonal_plains_colors[season_index],
+    }
+    if state == calendar_window_last_state:
+        return
+    calendar_window_queue.put(state, block=False)
+    calendar_window_last_state = state
 
 
 def send_wind_window_state():
@@ -3909,6 +4088,8 @@ def main():
                     toggle_currency_window()
                 elif event.key == pygame.K_8:
                     toggle_weather_window()
+                elif event.key == pygame.K_c:
+                    toggle_calendar_window()
                 elif event.key == pygame.K_9:
                     toggle_wind_window()
                 elif event.key == pygame.K_o:
@@ -3995,6 +4176,12 @@ def main():
 
     pending_promotion_piece = None
     close_promotion_shop()
+    if calendar_window_process is not None and calendar_window_process.is_alive():
+        calendar_window_queue.put({'close': True})
+        calendar_window_process.join(timeout=0.2)
+        if calendar_window_process.is_alive():
+            calendar_window_process.terminate()
+            calendar_window_process.join(timeout=0.5)
     close_player_status_window()
     pygame.quit()
 

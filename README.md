@@ -120,10 +120,14 @@ top discard in play.
 
 ## Weather and Calendar
 
-The calendar starts on Monday and shows a rolling seven-day forecast for each
-layer. Each forecast gives a condition and the chance that it will occur. The
-weather day advances after both players have completed three turns each.
-Weather and wind can also be inspected in their separate windows.
+The game starts on the first day of Spring. Each season lasts seven in-game
+days, then cycles through Summer, Fall, and Winter before Spring begins again.
+The Plains change colors with the season: bright greens in Spring, yellowish
+greens in Summer, reddish tones in Fall, and pale colors in Winter. The
+calendar starts on Monday; the weather day advances after both players have
+completed three turns each. The seven-day weather forecast shows conditions
+and their chances for each layer, and weather and wind can also be inspected
+in separate windows.
 
 Conditions vary by layer:
 
@@ -131,8 +135,7 @@ Conditions vary by layer:
   drifts across the board; during Stormy weather, clouds damage pieces caught
   beneath them at the end of their owner's turn.
 - **Plains:** Sunny, Cloudy, Rainy, Windy, Drought, Thunderstorm, and Foggy.
-  On Sundays, the Plains use special colors and all bishops have a gold
-  outline around the piece artwork.
+  All bishops have a gold outline around the piece artwork on Sundays.
 - **Tunnels:** Dripping, Damp Mist, Cold Draft, Underground Rain, Still Air,
   and Foggy.
 - **Caves:** Dustfall, Cold, Barometric Winds, Crystal Haze, Dripping, and Cave
@@ -159,6 +162,7 @@ Weather also changes the board's daylight shading as the day progresses.
 | H | Toggle the Card Hand and Draw / Play Piles windows |
 | ` (backtick) | Open or close the Currency window |
 | 8 | Open or close the Weather Forecast |
+| C | Open or close the Season Calendar |
 | 9 | Open or close the Wind Indicator |
 | O | Open or close the Moon Phase window |
 | P | Open or close Player Status |
@@ -176,6 +180,9 @@ the attack prompt is clickable and deals 1 HP damage. Attacking ends your turn.
 
 The **Moon Phase** window displays the current lunar phase and in-game day. Its
 eight-phase cycle advances with each in-game day and restarts with a new match.
+
+The **Season Calendar** shows the current season, its day out of seven, and the
+weekday. It opens on the first day of Spring and updates as in-game days pass.
 
 The **Debug Card Deck** lets you play cards directly from the full deck for the
 current player and skip ahead one weather day. Its cards can bypass the normal
